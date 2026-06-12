@@ -1,0 +1,3 @@
+websockets==11.0.3
+paho-mqtt==1.6.1
+asyncio-mqtt==0.13.0

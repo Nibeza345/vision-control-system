@@ -1,0 +1,11 @@
+Single Servo Wiring (3 wires)
+=============================
+
+  Yellow or Orange  →  D4 on ESP8266 (signal)
+  Red               →  5V on ESP8266
+  Brown             →  GND on ESP8266
+
+Camera (FalconEye)  →  USB cable to your PC (not to ESP8266)
+
+Only ONE servo = horizontal (left/right) movement.
+The PC still calculates up/down in software; with one servo only left/right moves the motor.

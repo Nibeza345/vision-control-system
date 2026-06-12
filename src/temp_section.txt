@@ -1,0 +1,14 @@
+    # Update position tracking for optimization
+    try:
+        if recognized_faces:
+            current_bbox = recognized_faces[0]['bbox']
+            if prev_position:
+                movement = abs((current_bbox[0] + current_bbox[2]//2) - prev_position[0]) + abs((current_bbox[1] + current_bbox[3]//2) - prev_position[1])
+                if movement > MOVEMENT_THRESHOLD:
+                    stable_frames = 0  # Reset stability if movement detected
+            prev_position = (current_bbox[0] + current_bbox[2]//2, current_bbox[1] + current_bbox[3]//2)
+        else:
+            stable_frames = 0
+            prev_position = None
+    except Exception as e:
+        print(f"Error updating position tracking: {e}")
