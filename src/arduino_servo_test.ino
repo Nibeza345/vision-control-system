@@ -7,7 +7,7 @@
 
 Servo myservo;  // Create servo object
 
-int servo_pin = D4;  // GPIO2 on NodeMCU
+int servo_pin = D5;  // GPIO14 on NodeMCU
 
 void setup() {
   Serial.begin(115200);
@@ -15,7 +15,7 @@ void setup() {
   
   Serial.println("Starting servo test...");
   
-  myservo.attach(servo_pin);  // Attach servo to pin D4
+  myservo.attach(servo_pin);  // Attach servo to pin D5
   
   // Test sequence
   Serial.println("Moving to 90 degrees (center)");

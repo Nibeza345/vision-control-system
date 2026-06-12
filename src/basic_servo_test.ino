@@ -4,7 +4,7 @@
 */
 
 // Use ESP8266 specific servo approach
-#define SERVO_PIN D4  // GPIO2 on NodeMCU
+#define SERVO_PIN D5  // GPIO14 on NodeMCU
 
 void setup() {
   Serial.begin(115200);

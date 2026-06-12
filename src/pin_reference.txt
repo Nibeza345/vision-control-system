@@ -1,11 +1,29 @@
 Single Servo Wiring (3 wires)
 =============================
 
-  Yellow or Orange  →  D4 on ESP8266 (signal)
-  Red               →  5V on ESP8266
+  Yellow or Orange  →  D5 on ESP8266 (signal)
+  Red               →  VIN on ESP8266 (motor power — ~5V when USB-powered)
   Brown             →  GND on ESP8266
+
+  Do NOT connect servo red to 3.3V — not enough power for the motor.
+
+  D5 (GPIO14) is used instead of D4 so uploads work with the servo connected.
+
+  If the servo buzzes but barely moves, use a separate 5V supply:
+    supply +5V  →  servo red AND ESP VIN
+    supply GND  →  servo brown AND ESP GND  (grounds must be tied together)
 
 Camera (FalconEye)  →  USB cable to your PC (not to ESP8266)
 
 Only ONE servo = horizontal (left/right) movement.
 The PC still calculates up/down in software; with one servo only left/right moves the motor.
+
+HARDWARE TROUBLESHOOTING (servo won't move at all)
+==================================================
+  1. Upload src/servo_hardware_test/ (no WiFi) — if horn still does not move = hardware
+  2. Confirm yellow wire is on D5 (not D4, not 3.3V)
+  3. Red on VIN, brown on GND — if red/brown swapped, servo will not work
+  4. USB power alone often fails — use phone charger 5V to VIN + shared GND
+  5. Buzzing but no movement = weak power OR broken servo gear
+  6. Totally silent + no movement = no power, wrong pin, or dead servo
+  7. Try another servo or another USB cable/port if available

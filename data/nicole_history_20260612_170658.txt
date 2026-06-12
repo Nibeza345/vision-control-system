@@ -1,0 +1,44 @@
+Face locking started for Nicole at 2026-06-12 17:06:58.855678
+Initial similarity: 0.6695
+--------------------------------------------------
+17:07:04.564 | moved left (49px)
+2026-06-12T17:07:04.909307 | Re-acquire scan started
+17:08:20.362 | moved left (71px)
+2026-06-12T17:08:21.846678 | Re-acquire scan started
+17:08:23.081 | moved left (46px)
+2026-06-12T17:08:23.686510 | Re-acquire scan started
+2026-06-12T17:08:24.885486 | Re-acquire scan started
+17:08:26.698 | moved right (86px)
+17:08:26.913 | moved right (109px)
+2026-06-12T17:08:28.814364 | Re-acquire scan started
+17:08:30.435 | moved left (137px)
+2026-06-12T17:08:31.025518 | Re-acquire scan started
+2026-06-12T17:08:41.002749 | Re-acquire scan started
+17:08:42.301 | moved right (50px)
+2026-06-12T17:08:43.531390 | Re-acquire scan started
+2026-06-12T17:08:49.147054 | Re-acquire scan started
+17:08:49.346 | moved right (254px)
+17:08:49.949 | moved right (42px)
+2026-06-12T17:08:52.270008 | Re-acquire scan started
+2026-06-12T17:08:55.179885 | Re-acquire scan started
+17:09:20.304 | moved left (117px)
+2026-06-12T17:09:22.529959 | Re-acquire scan started
+17:09:32.003 | moved right (397px)
+2026-06-12T17:09:44.638321 | Re-acquire scan started
+2026-06-12T17:09:56.722443 | Re-acquire scan started
+17:10:13.305 | moved left (249px)
+2026-06-12T17:10:19.181354 | Re-acquire scan started
+17:10:28.541 | moved left (433px)
+17:10:29.815 | moved right (70px)
+2026-06-12T17:10:36.964591 | Re-acquire scan started
+17:11:17.831 | moved right (151px)
+2026-06-12T17:11:19.007948 | Re-acquire scan started
+17:13:12.865 | moved left (147px)
+17:13:13.889 | smile (score: 0.74)
+17:13:14.037 | moved right (147px)
+17:13:14.106 | moved right (72px)
+2026-06-12T17:13:15.470663 | Re-acquire scan started
+17:13:15.565 | moved right (552px)
+2026-06-12T17:13:16.097143 | Re-acquire scan started
+17:13:17.282 | moved left (602px)
+2026-06-12T17:13:19.387415 | Re-acquire scan started

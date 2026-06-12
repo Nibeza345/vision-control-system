@@ -1,0 +1,7 @@
+Face locking started for Nicole at 2026-06-12 16:39:54.680467
+Initial similarity: 0.6265
+--------------------------------------------------
+16:39:54.685 | moved right (137px)
+2026-06-12T16:39:54.929164 | Re-acquire scan started
+16:39:56.327 | moved left (222px)
+2026-06-12T16:39:57.441266 | Re-acquire scan started

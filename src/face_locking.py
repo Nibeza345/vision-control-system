@@ -16,16 +16,25 @@ import time
 
 # ===================== CONFIGURATION =====================
 LOCK_THRESHOLD = 0.62  # Similarity required to start a new lock
-HOLD_THRESHOLD = 0.55  # Lower bar to keep lock (stops flicker near threshold)
+HOLD_THRESHOLD = 0.52  # Keep lock through brief score dips
+LOCK_CONFIRM_FRAMES = 10  # Must see target N frames in a row before locking
+LOCK_SETTLE_FRAMES = 45  # ~1.5s after lock: servo holds still so lock stabilizes
 _target_input = input("Enter the identity to lock onto [nicole]: ").strip().lower()
 TARGET_NAME = _target_input or "nicole"
-EMPTY_SEARCH_FRAMES = 3   # No face in frame → start search quickly
-MISS_SEARCH_FRAMES = 8    # Face seen but not nicole nearby → start search
-REACQUIRE_SCAN_RANGE = 40  # Degrees to sweep each side during search
-REACQUIRE_SCAN_STEP = 3.0  # Degrees per frame while scanning (visible on 1 servo)
-MAX_TRACK_JUMP_RATIO = 0.22  # Reject jumps larger than this vs frame size when locked
-MOVEMENT_THRESHOLD = 40  # Adjusted for full-frame pixel scale
-DEADZONE_RATIO = 0.10  # Center deadband as fraction of frame width/height
+EMPTY_SEARCH_FRAMES = 12  # Frames with no face before search (after lock)
+MISS_SEARCH_FRAMES = 18   # Frames target missing before search (after lock)
+SEARCH_PAN_MIN = 30
+SEARCH_PAN_MAX = 150
+REACQUIRE_SCAN_STEP = 8.0
+SEARCH_PUBLISH_INTERVAL = 0.4   # Slow search sweep
+TRACK_PUBLISH_INTERVAL = 0.35   # Slow follow — stops dancing
+MIN_PAN_PUBLISH_DELTA = 6       # Ignore small angle changes
+PAN_STEP_MAX = 5.0              # Small steps per correction
+PAN_INVERT = False              # Set True if servo turns the wrong way
+MAX_TRACK_JUMP_RATIO = 0.35     # Reject jumps when TRACKING
+MOVEMENT_THRESHOLD = 40
+DEADZONE_RATIO = 0.20           # Wide center — no move while face is here
+FACE_CENTER_SMOOTHING = 0.35    # Smooth face position (reduces bbox jitter)
 BLINK_EAR_THRESHOLD = 0.21
 SMILE_CONFIDENCE_THRESHOLD = 0.65
 CONSECUTIVE_SMILE_FRAMES = 3
@@ -44,7 +53,7 @@ SERVO_MAX_ANGLE = 180
 SERVO_CENTER = 90
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
-SERVO_SMOOTHING = 0.3
+SERVO_SMOOTHING = 0.25
 LOG_DIR = "../data/logs"
 
 # ===================== DETECTION TUNING =====================
@@ -243,10 +252,10 @@ target_pan_angle = SERVO_CENTER
 target_tilt_angle = SERVO_CENTER
 last_known_face_x = None
 last_known_face_y = None
-search_pan_offset = 0.0
-search_tilt_offset = 0.0
-search_pan_dir = 1
-search_tilt_dir = 1
+search_sweep_pan = float(SERVO_CENTER)
+search_sweep_dir = 1
+smoothed_face_x = None
+smoothed_face_y = None
 
 def clamp_angle(angle):
     return max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, angle))
@@ -279,7 +288,40 @@ def init_mqtt():
 
 def calculate_pan_angle(face_center_x, frame_width):
     normalized_x = face_center_x / frame_width
-    return clamp_angle(SERVO_MAX_ANGLE - (normalized_x * (SERVO_MAX_ANGLE - SERVO_MIN_ANGLE)))
+    angle = SERVO_MAX_ANGLE - (normalized_x * (SERVO_MAX_ANGLE - SERVO_MIN_ANGLE))
+    if PAN_INVERT:
+        angle = SERVO_MAX_ANGLE - (angle - SERVO_CENTER) + SERVO_CENTER
+    return clamp_angle(angle)
+
+
+def smooth_face_center(face_center_x, face_center_y):
+    """EMA smooth face center so bbox jitter does not shake the servo."""
+    global smoothed_face_x, smoothed_face_y
+    if smoothed_face_x is None:
+        smoothed_face_x = float(face_center_x)
+        smoothed_face_y = float(face_center_y)
+    else:
+        a = FACE_CENTER_SMOOTHING
+        smoothed_face_x = a * face_center_x + (1 - a) * smoothed_face_x
+        smoothed_face_y = a * face_center_y + (1 - a) * smoothed_face_y
+    return smoothed_face_x, smoothed_face_y
+
+
+def step_pan_toward_face(face_center_x, frame_width):
+    """One small pan step toward centering the face (only call when publishing)."""
+    global current_pan_angle
+    cx = frame_width / 2.0
+    error = face_center_x - cx
+    dead = frame_width * DEADZONE_RATIO
+    if abs(error) < dead:
+        return current_pan_angle, False
+
+    error_norm = max(-1.0, min(1.0, error / cx))
+    delta = -error_norm * PAN_STEP_MAX
+    if PAN_INVERT:
+        delta = -delta
+    current_pan_angle = clamp_angle(current_pan_angle + delta)
+    return current_pan_angle, True
 
 def calculate_tilt_angle(face_center_y, frame_height):
     normalized_y = face_center_y / frame_height
@@ -313,22 +355,23 @@ def resolve_movement(face_center_x, face_center_y, frame_width, frame_height):
         status = f"MOVE_{tilt_cmd}"
     return status, pan_cmd, tilt_cmd
 
+def reset_search_sweep():
+    global search_sweep_pan, search_sweep_dir
+    search_sweep_pan = float(SERVO_CENTER)
+    search_sweep_dir = 1
+
+
 def advance_search_angles():
-    global search_pan_offset, search_tilt_offset, search_pan_dir, search_tilt_dir
-    search_pan_offset += REACQUIRE_SCAN_STEP * search_pan_dir
-    if abs(search_pan_offset) >= REACQUIRE_SCAN_RANGE:
-        search_pan_dir *= -1
-        search_pan_offset = max(-REACQUIRE_SCAN_RANGE, min(REACQUIRE_SCAN_RANGE, search_pan_offset))
-    search_tilt_offset += (REACQUIRE_SCAN_STEP * 0.6) * search_tilt_dir
-    if abs(search_tilt_offset) >= REACQUIRE_SCAN_RANGE * 0.5:
-        search_tilt_dir *= -1
-        search_tilt_offset = max(-REACQUIRE_SCAN_RANGE * 0.5, min(REACQUIRE_SCAN_RANGE * 0.5, search_tilt_offset))
-    base_pan = last_known_pan_angle() if last_known_face_x is not None else SERVO_CENTER
-    base_tilt = last_known_tilt_angle() if last_known_face_y is not None else SERVO_CENTER
-    return (
-        clamp_angle(base_pan + search_pan_offset),
-        clamp_angle(base_tilt + search_tilt_offset),
-    )
+    """Sweep pan servo across full range until target face is seen again."""
+    global search_sweep_pan, search_sweep_dir
+    search_sweep_pan += REACQUIRE_SCAN_STEP * search_sweep_dir
+    if search_sweep_pan >= SEARCH_PAN_MAX:
+        search_sweep_pan = float(SEARCH_PAN_MAX)
+        search_sweep_dir = -1
+    elif search_sweep_pan <= SEARCH_PAN_MIN:
+        search_sweep_pan = float(SEARCH_PAN_MIN)
+        search_sweep_dir = 1
+    return clamp_angle(search_sweep_pan), float(SERVO_CENTER)
 
 def last_known_pan_angle():
     if last_known_face_x is None:
@@ -374,13 +417,11 @@ def publish_movement(
         if face_center_x is not None and face_center_y is not None:
             last_known_face_x = face_center_x
             last_known_face_y = face_center_y
-            target_pan_angle = calculate_pan_angle(face_center_x, frame_width)
-            target_tilt_angle = calculate_tilt_angle(face_center_y, frame_height)
-            current_pan_angle = (SERVO_SMOOTHING * target_pan_angle +
-                                 (1 - SERVO_SMOOTHING) * current_pan_angle)
+            sx, sy = smooth_face_center(face_center_x, face_center_y)
+            pan_angle, _ = step_pan_toward_face(sx, frame_width)
+            target_tilt_angle = calculate_tilt_angle(sy, frame_height)
             current_tilt_angle = (SERVO_SMOOTHING * target_tilt_angle +
                                   (1 - SERVO_SMOOTHING) * current_tilt_angle)
-            pan_angle = current_pan_angle
             tilt_angle = current_tilt_angle
         else:
             pan_angle = current_pan_angle
@@ -426,10 +467,35 @@ def publish_movement(
 
     if mqtt_client:
         try:
-            mqtt_client.publish(MQTT_TOPIC, json.dumps(movement_msg))
+            pan_int = int(round(float(pan_angle)))
+            global last_published_pan, last_track_publish_time, last_search_publish_time
+            now = time.time()
+            is_search = status == "SEARCH"
+            if is_search:
+                if now - last_search_publish_time < SEARCH_PUBLISH_INTERVAL:
+                    return
+            else:
+                if now - last_track_publish_time < TRACK_PUBLISH_INTERVAL:
+                    return
+                if status == "CENTERED":
+                    return
+                if (last_published_pan is not None and
+                        abs(pan_int - last_published_pan) < MIN_PAN_PUBLISH_DELTA):
+                    return
+
+            servo_payload = json.dumps({
+                "status": "SEARCH" if is_search else "TRACK",
+                "pan_angle": pan_int,
+                "servo_angle": pan_int,
+            })
+            mqtt_client.publish(MQTT_TOPIC, servo_payload)
+            last_published_pan = pan_int
+            if is_search:
+                last_search_publish_time = now
+            else:
+                last_track_publish_time = now
             print(
-                f"📡 {status} | pan {movement_msg['pan_angle']}° tilt {movement_msg['tilt_angle']}° "
-                f"| {pan_cmd}/{tilt_cmd} | lock={lock_state}"
+                f"📡 {status} | pan {pan_int}° | {pan_cmd}/{tilt_cmd} | lock={lock_state}"
             )
         except Exception as e:
             print(f"Error publishing movement: {e}")
@@ -473,6 +539,11 @@ prev_position = None
 last_published_status = None
 last_lock_display = None  # Cached bbox for stable overlay when detection hiccups
 empty_frame_count = 0
+last_search_publish_time = 0.0
+last_track_publish_time = 0.0
+last_published_pan = None
+lock_confirm_count = 0
+frames_since_lock = 9999
 
 print("\n" + "=" * 50)
 print(f"Target: {TARGET_NAME.capitalize()} | 2DOF pan/tilt tracking")
@@ -481,7 +552,8 @@ print(" - Press 'q' to quit")
 print(" - Press 'r' to manually release lock")
 print(" - Colors: Thick Green = locked target | Thin Green = other target instances")
 print("           Yellow = other enrolled people | Red = unknown")
-print(" - Occlusion: lock stays active, enters REACQUIRING scan mode")
+print(" - Servo stays still until lock is stable, then follows slowly")
+print(" - Step away after lock: servo scans until you return")
 print("=" * 50 + "\n")
 
 cap = open_camera(0)
@@ -595,8 +667,9 @@ while True:
     match_threshold = HOLD_THRESHOLD if locked else LOCK_THRESHOLD
     target_faces = [fd for fd in recognized_faces if fd['sim_to_target'] >= match_threshold]
 
-    # When locked, only keep faces near the last position (you left → start search)
-    if locked and prev_bbox and target_faces:
+    # When TRACKING, reject huge position jumps. During REACQUIRING, accept face anywhere
+    # in frame so we can re-lock after you leave and come back from a new angle.
+    if locked and prev_bbox and target_faces and tracking_state == "TRACKING":
         prev_cx = prev_bbox[0] + prev_bbox[2] // 2
         prev_cy = prev_bbox[1] + prev_bbox[3] // 2
         max_jump = int(max(w_frame, h_frame) * MAX_TRACK_JUMP_RATIO)
@@ -614,65 +687,78 @@ while True:
     if target_faces:
         empty_frame_count = 0
         if locked:
-            prev_cx = prev_bbox[0] + prev_bbox[2] // 2
-            prev_cy = prev_bbox[1] + prev_bbox[3] // 2
-            def dist(fd):
-                cx = fd['bbox'][0] + fd['bbox'][2] // 2
-                cy = fd['bbox'][1] + fd['bbox'][3] // 2
-                return (cx - prev_cx)**2 + (cy - prev_cy)**2
-            locked_face = min(target_faces, key=dist)
+            if tracking_state == "REACQUIRING":
+                locked_face = max(target_faces, key=lambda fd: fd['sim_to_target'])
+            else:
+                prev_cx = prev_bbox[0] + prev_bbox[2] // 2
+                prev_cy = prev_bbox[1] + prev_bbox[3] // 2
+                def dist(fd):
+                    cx = fd['bbox'][0] + fd['bbox'][2] // 2
+                    cy = fd['bbox'][1] + fd['bbox'][3] // 2
+                    return (cx - prev_cx)**2 + (cy - prev_cy)**2
+                locked_face = min(target_faces, key=dist)
         else:
-            # New lock: highest similarity
-            locked_face = max(target_faces, key=lambda fd: fd['sim_to_target'])
-            locked = True
-            tracking_state = "TRACKING"
-            locked_start = datetime.now()
+            best = max(target_faces, key=lambda fd: fd['sim_to_target'])
+            lock_confirm_count += 1
+            if lock_confirm_count < LOCK_CONFIRM_FRAMES:
+                locked_face = best
+            else:
+                locked_face = best
+                locked = True
+                tracking_state = "TRACKING"
+                locked_start = datetime.now()
+                frames_since_lock = 0
+                miss_count = 0
+                smoothed_face_x = None
+                smoothed_face_y = None
+                reset_search_sweep()
+                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                history_file = f"../data/{TARGET_NAME}_history_{timestamp_str}.txt"
+                action_detector.update_baseline(locked_face['lm'], h_frame, w_frame)
+                with open(history_file, 'w') as f:
+                    f.write(f"Face locking started for {TARGET_NAME.capitalize()} at {datetime.now()}\n")
+                    f.write(f"Initial similarity: {locked_face['sim_to_target']:.4f}\n")
+                    f.write("-" * 50 + "\n")
+                print(f"\n✓ LOCKED onto {TARGET_NAME.capitalize()} (similarity: {locked_face['sim_to_target']:.3f})")
+                print(f"  Servo will hold still for ~{LOCK_SETTLE_FRAMES // 30}s, then follow slowly")
+                print(f" History saved to: {history_file}")
+
+        if locked:
+            actions = action_detector.detect_actions(
+                locked_face['lm'], h_frame, w_frame, locked=True
+            )
+            if actions and history_file:
+                timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                with open(history_file, 'a') as f:
+                    for action in actions:
+                        f.write(f"{timestamp} | {action}\n")
+
+            if tracking_state == "REACQUIRING":
+                print("\n✓ Speaker re-acquired")
+            reset_search_sweep()
+
+            prev_bbox = locked_face['bbox']
             miss_count = 0
-            search_pan_offset = 0.0
-            search_tilt_offset = 0.0
-            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            history_file = f"../data/{TARGET_NAME}_history_{timestamp_str}.txt"
-            action_detector.update_baseline(locked_face['lm'], h_frame, w_frame)
-            with open(history_file, 'w') as f:
-                f.write(f"Face locking started for {TARGET_NAME.capitalize()} at {datetime.now()}\n")
-                f.write(f"Initial similarity: {locked_face['sim_to_target']:.4f}\n")
-                f.write("-" * 50 + "\n")
-            print(f"\n✓ LOCKED onto {TARGET_NAME.capitalize()} (similarity: {locked_face['sim_to_target']:.3f})")
-            print(f" History saved to: {history_file}")
-
-        # Detect actions on locked face
-        actions = action_detector.detect_actions(
-            locked_face['lm'], h_frame, w_frame, locked=True
-        )
-        if actions and history_file:
-            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            with open(history_file, 'a') as f:
-                for action in actions:
-                    f.write(f"{timestamp} | {action}\n")
-
-        if tracking_state == "REACQUIRING":
             tracking_state = "TRACKING"
-            search_pan_offset = 0.0
-            search_tilt_offset = 0.0
-            print("\n✓ Speaker re-acquired")
+            frames_since_lock += 1
+            last_lock_display = {
+                'bbox': locked_face['bbox'],
+                'sim': locked_face['sim_to_target'],
+            }
 
-        prev_bbox = locked_face['bbox']
-        miss_count = 0
-        tracking_state = "TRACKING"
-        last_lock_display = {
-            'bbox': locked_face['bbox'],
-            'sim': locked_face['sim_to_target'],
-        }
-
-        face_center_x = locked_face['bbox'][0] + locked_face['bbox'][2] // 2
-        face_center_y = locked_face['bbox'][1] + locked_face['bbox'][3] // 2
-        status, pan_cmd, tilt_cmd = resolve_movement(face_center_x, face_center_y, w_frame, h_frame)
-        publish_movement(
-            status, locked_face['sim_to_target'], face_center_x, face_center_y,
-            w_frame, h_frame, lock_state="TRACKING", pan_cmd=pan_cmd, tilt_cmd=tilt_cmd,
-        )
-        last_published_status = status
+            face_center_x = locked_face['bbox'][0] + locked_face['bbox'][2] // 2
+            face_center_y = locked_face['bbox'][1] + locked_face['bbox'][3] // 2
+            status, pan_cmd, tilt_cmd = resolve_movement(face_center_x, face_center_y, w_frame, h_frame)
+            if frames_since_lock >= LOCK_SETTLE_FRAMES and status != "CENTERED":
+                now = time.time()
+                if now - last_track_publish_time >= TRACK_PUBLISH_INTERVAL:
+                    publish_movement(
+                        status, locked_face['sim_to_target'], face_center_x, face_center_y,
+                        w_frame, h_frame, lock_state="TRACKING", pan_cmd=pan_cmd, tilt_cmd=tilt_cmd,
+                    )
+                    last_published_status = status
     else:
+        lock_confirm_count = 0
         if locked:
             miss_count += 1
             if not recognized_faces:
@@ -688,19 +774,21 @@ while True:
             if should_search:
                 if tracking_state != "REACQUIRING":
                     tracking_state = "REACQUIRING"
-                    search_pan_offset = 0.0
-                    search_tilt_offset = 0.0
-                    print("\n⚠ Speaker lost — servo search started (lock held)")
+                    reset_search_sweep()
+                    print("\n⚠ Speaker lost — servo scanning until you return (lock held)")
                     if history_file:
                         with open(history_file, 'a') as f:
                             f.write(f"{datetime.now().isoformat()} | Re-acquire scan started\n")
-                scan_pan, scan_tilt = advance_search_angles()
-                publish_movement(
-                    "SEARCH", 0.0, lock_state="REACQUIRING",
-                    pan_cmd="SCAN", tilt_cmd="SCAN",
-                    pan_angle=scan_pan, tilt_angle=scan_tilt,
-                )
-                last_published_status = "SEARCH"
+                now = time.time()
+                if now - last_search_publish_time >= SEARCH_PUBLISH_INTERVAL:
+                    scan_pan, scan_tilt = advance_search_angles()
+                    publish_movement(
+                        "SEARCH", 0.0, lock_state="REACQUIRING",
+                        pan_cmd="SCAN", tilt_cmd="SCAN",
+                        pan_angle=scan_pan, tilt_angle=scan_tilt,
+                    )
+                    last_published_status = "SEARCH"
+                    last_search_publish_time = now
             elif last_lock_display and miss_count <= 2:
                 locked_face = {
                     'bbox': last_lock_display['bbox'],
@@ -708,9 +796,10 @@ while True:
                     'name': TARGET_NAME,
                     'sim': last_lock_display['sim'],
                 }
-        elif not locked and tracking_state != "SEARCHING":
+        elif not locked:
             tracking_state = "SEARCHING"
             empty_frame_count = 0
+            # Servo stays still until locked — sit in front of camera to acquire lock
 
     # Candidate for aligned view when searching
     candidate_face = None
@@ -766,31 +855,36 @@ while True:
     elapsed = (datetime.now() - start_time).total_seconds()
     fps = fps_counter / elapsed if elapsed > 0 else 0
     face_count = len(recognized_faces) if recognized_faces else (1 if locked and last_lock_display else 0)
+    lock_label = 'LOCKED' if locked else 'UNLOCKED'
+    if not locked and lock_confirm_count > 0:
+        lock_label = f"ACQUIRING {lock_confirm_count}/{LOCK_CONFIRM_FRAMES}"
+    elif locked and frames_since_lock < LOCK_SETTLE_FRAMES:
+        lock_label = f"LOCKED (settling {LOCK_SETTLE_FRAMES - frames_since_lock}f)"
     status_line = (
-        f"FPS: {fps:.1f} | {tracking_state} | "
-        f"{'LOCKED' if locked else 'UNLOCKED'} | Faces: {face_count}"
+        f"FPS: {fps:.1f} | {tracking_state} | {lock_label} | Faces: {face_count}"
     )
     cv2.putText(frame, status_line, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-    # Get current window size and resize frame to match (maintain aspect ratio)
-    window_width = cv2.getWindowImageRect('Face Locking System')[2]
-    window_height = cv2.getWindowImageRect('Face Locking System')[3]
-
-    if window_width > 0 and window_height > 0:
-        h, w = frame.shape[:2]
-        aspect_ratio = w / h
-
-        new_width = window_width
-        new_height = int(window_width / aspect_ratio)
-
-        if new_height > window_height:
-            new_height = window_height
-            new_width = int(window_height * aspect_ratio)
-
-        frame_resized = cv2.resize(frame, (new_width, new_height))
-        cv2.imshow('Face Locking System', frame_resized)
-    else:
-        cv2.imshow('Face Locking System', frame)
+    # Resize to window if open; exit cleanly if user closed the window (X button)
+    window_name = 'Face Locking System'
+    try:
+        if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+            print("\nWindow closed — exiting...")
+            break
+        _, _, window_width, window_height = cv2.getWindowImageRect(window_name)
+        if window_width > 0 and window_height > 0:
+            h, w = frame.shape[:2]
+            aspect_ratio = w / h
+            new_width = window_width
+            new_height = int(window_width / aspect_ratio)
+            if new_height > window_height:
+                new_height = window_height
+                new_width = int(window_height * aspect_ratio)
+            frame = cv2.resize(frame, (new_width, new_height))
+        cv2.imshow(window_name, frame)
+    except cv2.error:
+        print("\nDisplay window unavailable — exiting...")
+        break
 
     # Send periodic heartbeat
     current_time = time.time()
@@ -808,8 +902,11 @@ while True:
         tracking_state = "SEARCHING"
         miss_count = 0
         last_lock_display = None
-        search_pan_offset = 0.0
-        search_tilt_offset = 0.0
+        reset_search_sweep()
+        lock_confirm_count = 0
+        frames_since_lock = 9999
+        smoothed_face_x = None
+        smoothed_face_y = None
         publish_movement(
             "STOP", 0.0, lock_state="SEARCHING",
             pan_cmd="STOP", tilt_cmd="STOP",

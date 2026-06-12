@@ -8,7 +8,7 @@
 
 const char* WIFI_SSID = "EdNet";
 const char* WIFI_PASSWORD = "Huawei@123";
-const int SERVO_PIN = D4;
+const int SERVO_PIN = D5;
 
 Servo myservo;
 
